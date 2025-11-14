@@ -450,6 +450,8 @@ class ExPyRe:
             post_run_commands = fin.readlines()
         if 'EXPYRE_TIMING_VERBOSE' in os.environ:
             sys.stderr.write(f'ExPyRe {self.id} start() calling system.submit {time.time()}\n')
+        #jpd47
+        print(f"resources={resources}, header_extra={header_extra} exact_fit={exact_fit}, partial_node={partial_node}")
         self.remote_id = system.submit(self.id, self.stage_dir, resources=resources, header_extra=header_extra,
                                        commands=(pre_run_commands + [f'{python_cmd} _expyre_script_core.py'] +
                                                  post_run_commands),

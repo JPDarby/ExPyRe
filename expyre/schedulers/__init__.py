@@ -4,5 +4,6 @@ from .slurm import Slurm
 from .pbs import PBS
 from .local import Local
 from .sge import SGE
+from .direct import Direct
 
-schedulers = {"slurm": Slurm, 'pbs': PBS, 'local': Local, 'sge': SGE}
+schedulers = {"slurm": Slurm, 'pbs': PBS, 'local': Local, 'sge': SGE, "direct": Direct}

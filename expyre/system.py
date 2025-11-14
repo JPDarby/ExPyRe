@@ -166,6 +166,8 @@ class System:
         if 'EXPYRE_TIMING_VERBOSE' in os.environ:
             sys.stderr.write(f'system {self.id} submit start scheduler submit {time.time()}\n')
         try:
+            #jpd47
+            print(f"node_dict={node_dict}")
             r = self.scheduler.submit(id, str(job_remote_rundir), actual_partition,
                                       commands, resources.max_time, self.queuing_sys_header + header_extra,
                                       node_dict, no_default_header=self.no_default_header, script_exec=self.script_exec,

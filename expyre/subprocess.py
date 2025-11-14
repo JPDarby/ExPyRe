@@ -121,7 +121,7 @@ def subprocess_run(host, args, script=None, shell='bash -c', remsh_cmd=None, ret
     retry = (max(retry[0], 1), max(retry[1], 0))
 
     args = _optionally_remote_args(args, shell, host, remsh_cmd, in_dir)
-
+    #print("jpd47 args are", args)
     if verbose:
         if dry_run:
             print('DRY-RUN COMMAND:')
