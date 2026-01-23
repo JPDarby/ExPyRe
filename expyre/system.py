@@ -182,7 +182,7 @@ class System:
         return r
 
 
-    def get_remotes(self, local_dir, subdir_glob=None, delete=False, verbose=False):
+    def get_remotes(self, local_dir, subdir_glob=None, delete=False, verbose=False, exclude=[]):
         """get data from directories of remotely running jobs
 
         Parameters
@@ -195,6 +195,7 @@ class System:
             delete local files that aren't in remote dir
         verbose: bool, default False
             verbose output
+        exclude: list, files/folders to not copy e.g. wavefunctions
         """
         if self.remote_rundir is None:
             # nothing to "get" since this ran in stage dir
@@ -208,9 +209,16 @@ class System:
             subdir_glob = '/' + subdir_glob[0]
         else:
             subdir_glob = '/{' + ','.join(subdir_glob) + '}'
+            
+        if len(exclude) == 0:
+            rcp_args="-a"
+        else:
+            rcp_args = "-a"
+            for l in exclude:
+                rcp_args += f' --exclude="{l}"'
 
         subprocess_copy(self.remote_rundir + subdir_glob, local_dir, from_host=self.host,
-                        remsh_cmd=self.remsh_cmd, delete=delete, verbose=verbose)
+                        remsh_cmd=self.remsh_cmd, delete=delete, verbose=verbose, rcp_args=rcp_args)
 
 
 

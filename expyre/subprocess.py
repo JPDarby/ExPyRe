@@ -70,7 +70,19 @@ def _optionally_remote_args(args, shell, host, remsh_cmd, in_dir='_HOME_'):
     if len(args) > 0:
         if len(cmd_str) > 0:
             cmd_str += ' && '
-        cmd_str += ' '.join([re.sub(r'([\'" \(\)])', r'\\\1', arg) for arg in args])
+        #cmd_str += ' '.join([re.sub(r'([\'" \(\)])', r'\\\1', arg) for arg in args])
+        #jpd47: this is a complete hack to avoid replacing " with \\" when trying to exclude files from being copie
+        escaped_args = []
+        for arg in args:
+            if "--exclude" in arg:
+                escaped_arg = arg
+            else:
+                escaped_arg = re.sub(r'([\'" \(\)])', r'\\\1', arg)
+            escaped_args.append(escaped_arg)
+
+        cmd_str += ' '.join(escaped_args)
+        
+        
     args = shell.split() + [cmd_str]
     if host is not None:
         # pass remote command to an ssh command, in single quotes
@@ -119,7 +131,6 @@ def subprocess_run(host, args, script=None, shell='bash -c', remsh_cmd=None, ret
 
     # always run at least once, and wait a valid (>= 0) amount of time
     retry = (max(retry[0], 1), max(retry[1], 0))
-
     args = _optionally_remote_args(args, shell, host, remsh_cmd, in_dir)
 
     if verbose:

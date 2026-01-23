@@ -467,7 +467,7 @@ class ExPyRe:
             sys.stderr.write(f'ExPyRe {self.id} start() end {time.time()}\n')
 
 
-    def sync_remote_results_status(self, sync_all=True, force_sync=False, verbose=False):
+    def sync_remote_results_status(self, sync_all=True, force_sync=False, verbose=False, exclude=[]):
         """Sync files associated with results from remote machine to local stage dirs and
         updates 'remote_status' in jobsdb.  Note that both have to happen because other
         functions assume that if remote status has been updated files have been staged back
@@ -496,11 +496,11 @@ class ExPyRe:
 
         jobs_to_sync = list(config.db.jobs(system=self.system_name, id=job_id, status=status))
 
-        ExPyRe._sync_remote_results_status_ll(jobs_to_sync, verbose=verbose)
+        ExPyRe._sync_remote_results_status_ll(jobs_to_sync, verbose=verbose, exclude=exclude)
 
 
     @classmethod
-    def _sync_remote_results_status_ll(cls, jobs_to_sync, n_group=250, cli=False, delete=False, verbose=False):
+    def _sync_remote_results_status_ll(cls, jobs_to_sync, n_group=250, cli=False, delete=False, verbose=False, exclude=[]):
         """Low level part of syncing jobs.  Gets remote files _and_ updates 'remote_status'
         field in jobsdb.  Note that both have to happen because other functions assume that
         if remote status has been updated files have been staged back as well.
@@ -522,6 +522,7 @@ class ExPyRe:
         """
         if len(jobs_to_sync) == 0:
             return
+            
 
         def _grouper(n, iterable):
             it = iter(iterable)
@@ -553,7 +554,7 @@ class ExPyRe:
             #    update status, showing job as done (despite missing files)
             for job_group in _grouper(n_group, jobs_to_sync):
                 system.get_remotes(stage_root, subdir_glob=[Path(j['from_dir']).name for j in job_group],
-                                   delete=delete, verbose=verbose)
+                                   delete=delete, verbose=verbose, exclude=exclude)
 
 
     def clean(self, wipe=False, dry_run=False, remote_only=False, verbose=False):
@@ -643,7 +644,7 @@ class ExPyRe:
         return stdout, stderr, job_stdout, job_stderr
 
 
-    def get_results(self, timeout=3600, check_interval=30, sync=True, sync_all=True, force_sync=False, quiet=False, verbose=False):
+    def get_results(self, timeout=3600, check_interval=30, sync=True, sync_all=True, force_sync=False, quiet=False, verbose=False, exclude=[]):
         """Get results from a remote job
 
         Parameters
@@ -673,7 +674,6 @@ class ExPyRe:
             * string containing stdout during function
             * string containing stderr during function
         """
-
         if self.status == 'processed' or self.status == 'cleaned':
             raise RuntimeError(f'Job {self.id} has status {self.status}, results are no longer available')
 
@@ -698,7 +698,7 @@ class ExPyRe:
                 # If it was pre-done, we obviously need current state and results.
                 # If it was something else (even 'failed'), lets try again just in case it needed
                 #     more time or was fixed manually.
-                self.sync_remote_results_status(sync_all, force_sync, verbose=verbose)
+                self.sync_remote_results_status(sync_all, force_sync, verbose=verbose, exclude=exclude)
 
                 remote_status = list(config.db.jobs(id=re.escape(self.id)))[0]['remote_status']
 
