@@ -1,11 +1,15 @@
 import os
+import sys
 import json
+import logging
 
 from ..subprocess import subprocess_run
 from ..units import time_to_HMS
 from .. import util
 
 from .base import Scheduler
+
+logger = logging.getLogger(__name__)
 
 
 class BareMetal(Scheduler):
@@ -19,9 +23,10 @@ class BareMetal(Scheduler):
     Only one job runs at a time per submission (no queuing). Hold/release
     operations are not supported.
 
-    The remote_id returned by submit() is a composite string ``PID::remote_dir``
-    so that status() can locate the job's exit status file without needing
-    external state.
+    The remote_id returned by submit() is a composite string
+    ``bare_metal::PID::remote_dir`` so that status() can locate the job's exit
+    status file without needing external state, and the prefix makes it
+    unambiguously identifiable as a bare_metal ID.
 
     Parameters
     ----------
@@ -45,7 +50,7 @@ class BareMetal(Scheduler):
         Parameters
         ----------
         remote_id: str
-            composite ID in format ``PID::remote_dir``
+            composite ID in format ``bare_metal::PID::remote_dir``
 
         Returns
         -------
@@ -54,10 +59,10 @@ class BareMetal(Scheduler):
         remote_dir: str
             remote directory path for the job
         """
-        parts = remote_id.split('::', 1)
-        if len(parts) != 2:
+        parts = remote_id.split('::', 2)
+        if len(parts) != 3 or parts[0] != 'bare_metal':
             raise ValueError(f'Invalid bare_metal remote_id format: {remote_id}')
-        return parts[0], parts[1]
+        return parts[1], parts[2]
 
 
     def submit(self, id, remote_dir, partition, commands, max_time, header, node_dict, no_default_header=False,
@@ -96,7 +101,7 @@ class BareMetal(Scheduler):
 
         Returns
         -------
-        str composite remote id ``PID::remote_dir``
+        str composite remote id ``bare_metal::PID::remote_dir``
         """
         node_dict = node_dict.copy()
         node_dict['id'] = id
@@ -145,23 +150,36 @@ class BareMetal(Scheduler):
 
         script += '\n'.join([line.rstrip() for line in commands]) + '\n'
 
-        # Build submission command
-        submit_args = pre_submit_cmds + (['&&'] if len(pre_submit_cmds) > 0 else [])
+        # Step 1: Write the job script to the remote machine via stdin.
+        # This MUST be a separate SSH call because the '&' operator used to
+        # background the job in step 2 causes bash (in non-interactive mode)
+        # to redirect stdin from /dev/null for the entire backgrounded command
+        # group. If cat were in the same command, it would read nothing and
+        # write an empty script file.
+        write_args = pre_submit_cmds + (['&&'] if len(pre_submit_cmds) > 0 else [])
+        write_args += ['cd', remote_dir, '&&', 'cat', '>', 'job.script.bare_metal']
 
-        # Write the script to a file via stdin, then run with nohup in background, echo PID
-        submit_args += ['cd', remote_dir, '&&', 'cat', '>', 'job.script.bare_metal']
+        subprocess_run(self.host, args=write_args, script=script,
+                       remsh_cmd=self.remsh_cmd, verbose=verbose)
 
+        logger.info(f'bare_metal submit [{self.host}]: wrote job script to {remote_dir}/job.script.bare_metal '
+                    f'({len(script)} bytes)')
+
+        # Step 2: Start the job as a background process and capture its PID.
+        # No stdin is piped, so backgrounding with & is safe here.
         if max_time is not None and max_time > 0:
-            submit_args += ['&&', 'nohup', 'timeout', f'{int(max_time)}',
-                            'bash', 'job.script.bare_metal',
-                            '>', f'job.{id}.stdout', '2>', f'job.{id}.stderr', '&',
-                            'echo', '$!']
+            run_args = ['cd', remote_dir, '&&',
+                        'nohup', 'timeout', f'{int(max_time)}',
+                        'bash', 'job.script.bare_metal',
+                        '>', f'job.{id}.stdout', '2>', f'job.{id}.stderr', '&',
+                        'echo', '$!']
         else:
-            submit_args += ['&&', 'nohup', 'bash', 'job.script.bare_metal',
-                            '>', f'job.{id}.stdout', '2>', f'job.{id}.stderr', '&',
-                            'echo', '$!']
+            run_args = ['cd', remote_dir, '&&',
+                        'nohup', 'bash', 'job.script.bare_metal',
+                        '>', f'job.{id}.stdout', '2>', f'job.{id}.stderr', '&',
+                        'echo', '$!']
 
-        stdout, stderr = subprocess_run(self.host, args=submit_args, script=script,
+        stdout, stderr = subprocess_run(self.host, args=run_args,
                                         remsh_cmd=self.remsh_cmd, verbose=verbose)
 
         # parse stdout for PID
@@ -175,8 +193,12 @@ class BareMetal(Scheduler):
         if pid is None:
             raise RuntimeError(f'Failed to get PID from bare metal job submission, stdout: {stdout}')
 
+        composite_id = f'bare_metal::{pid}::{remote_dir}'
+        logger.info(f'bare_metal submit [{self.host}]: job started with PID {pid}, '
+                    f'remote_id={composite_id}')
+
         # Return composite remote_id encoding both PID and remote_dir
-        return f'{pid}::{remote_dir}'
+        return composite_id
 
 
     def status(self, remote_ids, verbose=False):
@@ -191,7 +213,7 @@ class BareMetal(Scheduler):
         Parameters
         ----------
         remote_ids: str, list(str)
-            list of composite remote ids (PID::remote_dir) to check
+            list of composite remote ids (bare_metal::PID::remote_dir) to check
 
         Returns
         -------
@@ -205,12 +227,30 @@ class BareMetal(Scheduler):
         if len(remote_ids) == 0:
             return {}
 
-        # Build a single bash script to check all jobs in one SSH call
+        out = {}
+
+        # Pre-filter remote_ids: only those with the PID::remote_dir format are valid
+        # bare_metal IDs. Others (e.g. stale slurm/pbs numeric IDs left in the DB after
+        # switching scheduler) are treated as 'done' so they don't block result syncing.
+        valid_entries = []  # list of (remote_id, pid, remote_dir)
+        for remote_id in remote_ids:
+            try:
+                pid, remote_dir = self._parse_remote_id(remote_id)
+                valid_entries.append((remote_id, pid, remote_dir))
+            except ValueError:
+                logger.warning(f'bare_metal status [{self.host}]: skipping invalid remote_id '
+                               f'{remote_id!r} (likely from a previous scheduler), treating as done')
+                out[remote_id] = 'done'
+
+        if not valid_entries:
+            # All IDs were invalid/stale, nothing to check remotely
+            return out
+
+        # Build a single bash script to check all valid jobs in one SSH call
         check_lines = []
-        for i, remote_id in enumerate(remote_ids):
-            pid, remote_dir = self._parse_remote_id(remote_id)
+        for seq, (remote_id, pid, remote_dir) in enumerate(valid_entries):
             check_lines.extend([
-                f'echo "EXPYRE_STATUS_BEGIN:{i}"',
+                f'echo "EXPYRE_STATUS_BEGIN:{seq}"',
                 f'if [ -f "{remote_dir}/_expyre_exit_status" ]; then',
                 f'    exit_code=$(cat "{remote_dir}/_expyre_exit_status" 2>/dev/null)',
                 f'    echo "FINISHED:$exit_code"',
@@ -228,7 +268,6 @@ class BareMetal(Scheduler):
             remsh_cmd=self.remsh_cmd, verbose=verbose)
 
         # Parse structured output
-        out = {}
         current_idx = None
         for line in stdout.strip().splitlines():
             line = line.strip()
@@ -237,8 +276,8 @@ class BareMetal(Scheduler):
                     current_idx = int(line.split(':', 1)[1])
                 except (ValueError, IndexError):
                     current_idx = None
-            elif current_idx is not None and 0 <= current_idx < len(remote_ids):
-                remote_id = remote_ids[current_idx]
+            elif current_idx is not None and 0 <= current_idx < len(valid_entries):
+                remote_id = valid_entries[current_idx][0]
                 if line.startswith('FINISHED:'):
                     exit_code_str = line.split(':', 1)[1].strip()
                     try:
@@ -267,6 +306,8 @@ class BareMetal(Scheduler):
         for remote_id in remote_ids:
             if remote_id not in out:
                 out[remote_id] = 'done'
+
+        logger.info(f'bare_metal status [{self.host}]: {out}')
 
         return out
 
@@ -305,6 +346,9 @@ class BareMetal(Scheduler):
         Sends SIGTERM to each job's process, which triggers the EXIT trap
         to write the exit status file before the process dies.
 
+        Gracefully skips remote_ids that don't match the bare_metal format
+        (e.g. stale slurm/pbs IDs left in the database).
+
         Parameters
         ----------
         remote_ids: str, list(str)
@@ -315,6 +359,15 @@ class BareMetal(Scheduler):
         if isinstance(remote_ids, str):
             remote_ids = [remote_ids]
 
-        pids = [self._parse_remote_id(rid)[0] for rid in remote_ids]
-        subprocess_run(self.host, args=['kill'] + pids,
-                       remsh_cmd=self.remsh_cmd, verbose=verbose)
+        pids = []
+        for rid in remote_ids:
+            try:
+                pid, _ = self._parse_remote_id(rid)
+                pids.append(pid)
+            except ValueError:
+                logger.warning(f'bare_metal cancel [{self.host}]: skipping invalid remote_id '
+                               f'{rid!r} (likely from a previous scheduler)')
+
+        if pids:
+            subprocess_run(self.host, args=['kill'] + pids,
+                           remsh_cmd=self.remsh_cmd, verbose=verbose)
